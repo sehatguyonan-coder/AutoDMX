@@ -3,6 +3,23 @@ import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
 import { handleCommentTrigger, handleMessageEvent } from '@/lib/instagram';
 
+async function recordWebhookEvent(
+  account: { id: string; user_id: string },
+  eventType: string,
+  detail: string,
+  commentId?: string
+) {
+  const { error } = await supabase.from('webhook_events').insert({
+    user_id: account.user_id,
+    account_id: account.id,
+    comment_id: commentId || null,
+    event_type: eventType,
+    detail,
+  });
+
+  if (error) console.error('[Webhook POST] Failed to record diagnostic:', error.message);
+}
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const mode = searchParams.get('hub.mode');
@@ -74,7 +91,7 @@ export async function POST(request: NextRequest) {
     // Fetch the single connected account regardless of ID format (single-tenant routing)
     const { data: account, error: accountError } = await supabase
       .from('accounts')
-      .select('id, webhook_account_id, ig_user_id')
+      .select('id, user_id, webhook_account_id, ig_user_id')
       .limit(1)
       .maybeSingle();
 
@@ -136,23 +153,7 @@ export async function POST(request: NextRequest) {
       const commentValue = change.value;
       if (!commentValue || !commentValue.id) continue;
 
-      // Deduplication check: Attempt to insert comment_id into processed_comments
-      const { error: insertError } = await supabase
-        .from('processed_comments')
-        .insert({ comment_id: commentValue.id });
-
-      if (insertError) {
-        if (insertError.code === '23505') {
-          // Unique constraint violation - Duplicate comment, ignore it
-          console.log(`[Webhook POST] Duplicate comment ${commentValue.id} detected, ignoring.`);
-          continue; // Skip this comment but continue processing other changes/entries
-        } else {
-          // Other DB errors (e.g. timeout, connection issue)
-          console.error(`[Webhook POST] Database error inserting comment_id ${commentValue.id}:`, insertError);
-          // Return 500 to let the provider retry later
-          return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
-        }
-      }
+      await recordWebhookEvent(account, 'received', `Comment received: ${commentValue.text || '(empty)'}`, commentValue.id);
 
       // Bug fix: Skip comments made by our own account to prevent a reply loop.
       // When the bot posts a public reply, Meta fires a webhook for that reply too.
@@ -160,13 +161,17 @@ export async function POST(request: NextRequest) {
       const commentFromId = commentValue.from?.id;
       if (commentFromId && account.ig_user_id && commentFromId === account.ig_user_id) {
         console.log(`[Webhook POST] Skipping self-comment ${commentValue.id} from our own account to prevent reply loop.`);
+        await recordWebhookEvent(account, 'skipped_self', 'Comment was made by the connected Instagram account.', commentValue.id);
         continue;
       }
 
       const mediaId = commentValue.media?.id;
       const commentText = commentValue.text || '';
 
-      if (!mediaId) continue;
+      if (!mediaId) {
+        await recordWebhookEvent(account, 'skipped_invalid', 'Webhook comment payload did not contain a media ID.', commentValue.id);
+        continue;
+      }
 
       // Fetch active comment automations for this account
       const { data: automations, error: automationsError } = await supabase
@@ -178,9 +183,11 @@ export async function POST(request: NextRequest) {
 
       if (automationsError || !automations) {
         console.error('[Webhook POST] Error fetching automations:', automationsError);
+        await recordWebhookEvent(account, 'database_error', `Could not fetch automations: ${automationsError?.message || 'unknown error'}`, commentValue.id);
         continue;
       }
 
+      let matchedAutomation = false;
       for (const automation of automations) {
         // Match scope: specific post or any post
         const matchesScope =
@@ -203,12 +210,37 @@ export async function POST(request: NextRequest) {
         }
 
         if (matchesKeywords) {
+          matchedAutomation = true;
+          // Lock only a comment that is actually about to trigger an automation.
+          // Earlier versions inserted this marker before validating the event,
+          // permanently discarding a later retry of an incomplete webhook payload.
+          const { error: insertError } = await supabase
+            .from('processed_comments')
+            .insert({ comment_id: commentValue.id });
+
+          if (insertError) {
+            if (insertError.code === '23505') {
+              console.log(`[Webhook POST] Duplicate comment ${commentValue.id} detected, ignoring.`);
+              await recordWebhookEvent(account, 'duplicate', 'This comment was already processed.', commentValue.id);
+              break;
+            }
+
+            console.error(`[Webhook POST] Database error inserting comment_id ${commentValue.id}:`, insertError);
+            return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+          }
+
           try {
             await handleCommentTrigger(commentValue, automation);
+            await recordWebhookEvent(account, 'triggered', `Automation "${automation.name}" was triggered.`, commentValue.id);
           } catch (triggerError) {
             console.error('[Webhook POST] handleCommentTrigger failed:', triggerError);
+            await recordWebhookEvent(account, 'trigger_error', triggerError instanceof Error ? triggerError.message : String(triggerError), commentValue.id);
           }
         }
+      }
+
+      if (!matchedAutomation) {
+        await recordWebhookEvent(account, 'no_match', `No active automation matched post ${mediaId} and comment "${commentText}".`, commentValue.id);
       }
     }
   }

@@ -16,6 +16,13 @@ type Post = {
   timestamp: string;
 };
 
+type WebhookEvent = {
+  id: string;
+  event_type: string;
+  detail: string;
+  created_at: string;
+};
+
 function getInstagramSyncMessage(apiError: string) {
   const normalized = apiError.toLowerCase();
   const isInvalidToken =
@@ -158,6 +165,13 @@ export default async function Dashboard({
     .eq('account_id', activeAccount.id)
     .eq('media_scope', 'specific');
 
+  const { data: webhookEvents } = await supabase
+    .from('webhook_events')
+    .select('id, event_type, detail, created_at')
+    .eq('account_id', activeAccount.id)
+    .order('created_at', { ascending: false })
+    .limit(10);
+
   // 5. Fetch Instagram posts & reels
   let media: Post[] = [];
   let apiError: string | null = null;
@@ -222,8 +236,34 @@ export default async function Dashboard({
             }))}
           />
         )}
+
+        <WebhookDiagnostics events={webhookEvents || []} />
       </div>
     </AppShell>
+  );
+}
+
+function WebhookDiagnostics({ events }: { events: WebhookEvent[] }) {
+  return (
+    <section className="mt-10 rounded-2xl border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-neutral-900">
+      <h2 className="text-base font-semibold text-neutral-900 dark:text-white">Comment webhook diagnostics</h2>
+      <p className="mt-1 text-xs text-neutral-600 dark:text-neutral-400">Send a new test comment, then refresh this page. These are saved directly by the webhook.</p>
+      {events.length === 0 ? (
+        <p className="mt-4 text-sm text-neutral-500">No webhook events received yet.</p>
+      ) : (
+        <div className="mt-4 space-y-3">
+          {events.map((event) => (
+            <div key={event.id} className="rounded-xl bg-neutral-50 p-3 text-sm dark:bg-neutral-800/60">
+              <div className="flex items-center justify-between gap-4">
+                <strong className="text-neutral-900 dark:text-white">{event.event_type}</strong>
+                <time className="shrink-0 text-xs text-neutral-500">{new Date(event.created_at).toLocaleString()}</time>
+              </div>
+              <p className="mt-1 text-neutral-600 dark:text-neutral-300">{event.detail}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

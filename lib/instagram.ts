@@ -480,6 +480,7 @@ export async function handleCommentTrigger(
     console.log(`[Instagram Trigger] Successfully completed trigger sequence for comment ${comment.id}`);
   } catch (err) {
     console.error(`[Instagram Trigger Error] Failed to process comment trigger for comment ${comment.id}:`, err);
+    throw err;
   }
 }
 
