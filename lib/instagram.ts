@@ -72,6 +72,41 @@ interface DecryptedAccount {
   ig_username?: string;
 }
 
+/** Registers an Instagram Business account to receive this app's webhook events. */
+export async function subscribeAccountToWebhooks(
+  igUserId: string,
+  accessToken: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const response = await fetchWithBackoff(
+      `https://graph.instagram.com/v21.0/${igUserId}/subscribed_apps`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subscribed_fields: ['comments', 'messages'],
+          access_token: accessToken,
+        }),
+      }
+    );
+    const data = await response.json();
+
+    if (!response.ok || data.error) {
+      return {
+        success: false,
+        error: data.error?.message || `Meta returned HTTP ${response.status}.`,
+      };
+    }
+
+    return { success: true };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /**
  * Builds the final message string containing the final message and redirect-wrapped links.
  */
@@ -708,6 +743,15 @@ export async function initializeAccountIfNeeded(): Promise<{ success: boolean; e
       return {
         success: false,
         error: `Failed to insert account into database: ${insertError.message}`,
+      };
+    }
+
+    const subscription = await subscribeAccountToWebhooks(igUserId, token);
+    if (!subscription.success) {
+      console.error('[Auto-Init] Failed to subscribe Instagram account to webhooks:', subscription.error);
+      return {
+        success: false,
+        error: `Instagram account was connected, but webhook subscription failed: ${subscription.error}`,
       };
     }
 

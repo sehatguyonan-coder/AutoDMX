@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { encrypt } from '@/lib/crypto';
+import { subscribeAccountToWebhooks } from '@/lib/instagram';
 import { createClient } from '@/utils/supabase/server';
 
 type InstagramMeResponse =
@@ -87,6 +88,11 @@ export async function refreshInstagramCredentials(formData: FormData) {
 
   if (updateError) {
     redirectWithError(`Failed to update credentials: ${updateError.message}`);
+  }
+
+  const subscription = await subscribeAccountToWebhooks(account.ig_user_id, token);
+  if (!subscription.success) {
+    redirectWithError(`Instagram webhook subscription failed: ${subscription.error}`);
   }
 
   revalidatePath('/dashboard');
